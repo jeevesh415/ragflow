@@ -19,8 +19,8 @@ package service
 import (
 	"context"
 	"fmt"
+	"ragflow/internal/entity"
 	"ragflow/internal/server"
-	"strconv"
 	"strings"
 
 	"go.uber.org/zap"
@@ -28,8 +28,9 @@ import (
 	"ragflow/internal/dao"
 	"ragflow/internal/engine"
 	"ragflow/internal/logger"
-	"ragflow/internal/model"
+
 	"ragflow/internal/service/nlp"
+	"ragflow/internal/tokenizer"
 	"ragflow/internal/utility"
 )
 
@@ -77,9 +78,10 @@ type RetrievalTestRequest struct {
 
 // RetrievalTestResponse retrieval test response
 type RetrievalTestResponse struct {
-	Chunks []map[string]interface{} `json:"chunks"`
-	Labels []map[string]interface{} `json:"labels"`
-	Total  int64                    `json:"total,omitempty"`
+	Chunks  []map[string]interface{}  `json:"chunks"`
+	DocAggs []map[string]interface{}  `json:"doc_aggs"`
+	Labels  *[]map[string]interface{} `json:"labels"`
+	Total   int64                     `json:"total,omitempty"`
 }
 
 // RetrievalTest performs retrieval test
@@ -130,7 +132,7 @@ func (s *ChunkService) RetrievalTest(req *RetrievalTestRequest, userID string) (
 
 	// Check permission for each kb_id
 	var tenantIDs []string
-	var kbRecords []*model.Knowledgebase
+	var kbRecords []*entity.Knowledgebase
 
 	for _, kbID := range kbIDs {
 		found := false
@@ -283,8 +285,8 @@ func (s *ChunkService) RetrievalTest(req *RetrievalTestRequest, userID string) (
 
 	// Perform reranking
 	// Reference: rag/nlp/search.py L404-L429
-	tkWeight := 1.0 - *req.VectorSimilarityWeight
-	vtWeight := *req.VectorSimilarityWeight
+	vtWeight := getVectorSimilarityWeight(req.VectorSimilarityWeight)
+	tkWeight := 1.0 - vtWeight
 	useInfinity := s.engineType == server.EngineInfinity
 
 	sim, term_similarity, vector_similarity := nlp.Rerank(
@@ -312,10 +314,71 @@ func (s *ChunkService) RetrievalTest(req *RetrievalTestRequest, userID string) (
 
 	convertedChunks := buildRetrievalTestResults(filteredChunks)
 
+	// Build doc_aggs by aggregating chunks by docnm
+	docAggsMap := make(map[string]struct {
+		docID string
+		count int
+	})
+	docNameOrder := []string{} // Track insertion order of doc names
+	for _, chunk := range filteredChunks {
+		docName := ""
+		docID := ""
+		if v, ok := chunk["docnm"].(string); ok {
+			docName = v
+		}
+		if v, ok := chunk["doc_id"].(string); ok {
+			docID = v
+		}
+		if docName == "" {
+			continue
+		}
+		if entry, exists := docAggsMap[docName]; exists {
+			entry.count++
+			docAggsMap[docName] = entry
+		} else {
+			docAggsMap[docName] = struct {
+				docID string
+				count int
+			}{docID: docID, count: 1}
+			docNameOrder = append(docNameOrder, docName)
+		}
+	}
+
+	// Convert to list maintaining insertion order
+	type docAggEntry struct {
+		docName string
+		docID   string
+		count   int
+		order   int
+	}
+	docAggsList := make([]docAggEntry, 0, len(docAggsMap))
+	for order, docName := range docNameOrder {
+		entry := docAggsMap[docName]
+		docAggsList = append(docAggsList, docAggEntry{docName: docName, docID: entry.docID, count: entry.count, order: order})
+	}
+	// Sort by count descending, then by order ascending (for tie-breaking)
+	for i := 0; i < len(docAggsList)-1; i++ {
+		for j := i + 1; j < len(docAggsList); j++ {
+			if docAggsList[j].count > docAggsList[i].count ||
+				(docAggsList[j].count == docAggsList[i].count && docAggsList[j].order < docAggsList[i].order) {
+				docAggsList[i], docAggsList[j] = docAggsList[j], docAggsList[i]
+			}
+		}
+	}
+	docAggs := make([]map[string]interface{}, 0, len(docAggsList))
+	for _, entry := range docAggsList {
+		docAggs = append(docAggs, map[string]interface{}{
+			"doc_name": entry.docName,
+			"doc_id":   entry.docID,
+			"count":    entry.count,
+		})
+	}
+
 	return &RetrievalTestResponse{
-		Chunks: convertedChunks,
-		Labels: []map[string]interface{}{}, // Empty labels for now
-		Total:  int64(len(convertedChunks)),
+		Chunks:  convertedChunks,
+		DocAggs: docAggs,
+		Labels:  nil,
+		Total:   int64(len(convertedChunks)),
 	}, nil
 }
 
@@ -457,11 +520,7 @@ func buildRetrievalTestResults(filteredChunks []map[string]interface{}) []map[st
 			result["kb_id"] = v
 		}
 		if v, ok := chunk["position_int"]; ok {
-			if strVal, ok := v.(string); ok && strVal != "" {
-				result["positions"] = convertPositionInt(strVal)
-			} else {
-				result["positions"] = []interface{}{}
-			}
+			result["positions"] = v
 		}
 		if v, ok := chunk["doc_type_kwd"]; ok {
 			result["doc_type_kwd"] = v
@@ -473,6 +532,9 @@ func buildRetrievalTestResults(filteredChunks []map[string]interface{}) []map[st
 			result["important_kwd"] = v
 		} else if v, ok := chunk["important_keywords"]; ok {
 			result["important_kwd"] = v
+		}
+		if v, ok := chunk["tag_kwd"]; ok {
+			result["tag_kwd"] = v
 		}
 		if v, ok := chunk["similarity"]; ok {
 			result["similarity"] = v
@@ -490,42 +552,540 @@ func buildRetrievalTestResults(filteredChunks []map[string]interface{}) []map[st
 	return results
 }
 
-// convertPositionInt converts hex string format "00000001_0000005e_..." to array [[1, 94, ...], ...]
-func convertPositionInt(hexStr string) []interface{} {
-	if hexStr == "" {
-		return []interface{}{}
+// GetChunkRequest request for getting a chunk by ID
+type GetChunkRequest struct {
+	ChunkID string `json:"chunk_id"`
+}
+
+// GetChunkResponse response for getting a chunk
+type GetChunkResponse struct {
+	Chunk map[string]interface{} `json:"chunk"`
+}
+
+// Get retrieves a chunk by ID
+func (s *ChunkService) Get(req *GetChunkRequest, userID string) (*GetChunkResponse, error) {
+	if s.docEngine == nil {
+		return nil, fmt.Errorf("doc engine not initialized")
 	}
 
-	parts := strings.Split(hexStr, "_")
-	var intVals []int
-	for _, part := range parts {
-		if part == "" {
-			continue
-		}
-		// Parse hex string (without 0x prefix)
-		val, err := strconv.ParseInt(part, 16, 64)
+	if req.ChunkID == "" {
+		return nil, fmt.Errorf("chunk_id is required")
+	}
+
+	ctx := context.Background()
+
+	// Get user's tenants
+	tenants, err := s.userTenantDAO.GetByUserID(userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user tenants: %w", err)
+	}
+	if len(tenants) == 0 {
+		return nil, fmt.Errorf("user has no accessible tenants")
+	}
+
+	// Try each tenant to find the chunk
+	var chunk map[string]interface{}
+	for _, tenant := range tenants {
+		// Get kbIDs for this tenant
+		kbIDs, err := s.kbDAO.GetKBIDsByTenantID(tenant.TenantID)
 		if err != nil {
 			continue
 		}
-		intVals = append(intVals, int(val))
+
+		indexName := fmt.Sprintf("ragflow_%s", tenant.TenantID)
+
+		doc, err := s.docEngine.GetChunk(ctx, indexName, req.ChunkID, kbIDs)
+		if err != nil {
+			continue
+		}
+
+		if doc != nil {
+			chunk, ok := doc.(map[string]interface{})
+			if ok {
+				// Format to match Python output
+				result := make(map[string]interface{})
+				skipFields := map[string]bool{
+					"id": true, "authors": true, "_score": true, "SCORE": true,
+				}
+				for k, v := range chunk {
+					if skipFields[k] || strings.HasSuffix(k, "_vec") || strings.Contains(k, "_sm_") || strings.HasSuffix(k, "_tks") || strings.HasSuffix(k, "_ltks") {
+						continue
+					}
+					switch k {
+					case "content":
+						result["content_with_weight"] = v
+					case "docnm":
+						result["docnm_kwd"] = v
+					case "important_keywords":
+						utility.SetFieldArray(result, "important_kwd", v)
+					case "questions":
+						utility.SetFieldArray(result, "question_kwd", v)
+					case "entities_kwd", "entity_kwd", "entity_type_kwd", "from_entity_kwd",
+						"name_kwd", "raptor_kwd", "removed_kwd", "source_id", "tag_kwd",
+						"to_entity_kwd", "toc_kwd", "authors_tks", "doc_type_kwd":
+						if utility.IsEmpty(v) {
+							result[k] = []interface{}{}
+						} else {
+							result[k] = v
+						}
+					case "tag_feas":
+						if utility.IsEmpty(v) {
+							result[k] = map[string]interface{}{}
+						} else {
+							result[k] = v
+						}
+					case "create_timestamp_flt", "rank_flt", "weight_flt":
+						if floatVal, ok := utility.ToFloat64(v); ok {
+							result[k] = utility.JSONFloat64(floatVal)
+						}
+					default:
+						result[k] = v
+					}
+				}
+				return &GetChunkResponse{Chunk: result}, nil
+			}
+		}
 	}
 
-	// Group by 5 elements
-	var result []interface{}
-	for i := 0; i < len(intVals); i += 5 {
-		end := i + 5
-		if end > len(intVals) {
-			end = len(intVals)
-		}
-		group := make([]int, end-i)
-		copy(group, intVals[i:end])
-		// Convert to interface{} for JSON serialization
-		groupIf := make([]interface{}, len(group))
-		for j, v := range group {
-			groupIf[j] = v
-		}
-		result = append(result, groupIf)
+	if chunk == nil {
+		return nil, fmt.Errorf("chunk not found")
 	}
 
-	return result
+	return &GetChunkResponse{Chunk: chunk}, nil
+}
+
+// ListChunksRequest request for listing chunks
+type ListChunksRequest struct {
+	DocID        string `json:"doc_id" binding:"required"`
+	Page         *int   `json:"page,omitempty"`
+	Size         *int   `json:"size,omitempty"`
+	Keywords     string `json:"keywords,omitempty"`
+	AvailableInt *int   `json:"available_int,omitempty"`
+}
+
+// ListChunksResponse response for listing chunks
+type ListChunksResponse struct {
+	Chunks []map[string]interface{} `json:"chunks"`
+	Doc    map[string]interface{}   `json:"doc"`
+	Total  int64                    `json:"total"`
+}
+
+// List retrieves chunks for a document
+func (s *ChunkService) List(req *ListChunksRequest, userID string) (*ListChunksResponse, error) {
+	if s.docEngine == nil {
+		return nil, fmt.Errorf("doc engine not initialized")
+	}
+
+	if req.DocID == "" {
+		return nil, fmt.Errorf("doc_id is required")
+	}
+
+	ctx := context.Background()
+
+	// Get user's tenants
+	tenants, err := s.userTenantDAO.GetByUserID(userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user tenants: %w", err)
+	}
+	if len(tenants) == 0 {
+		return nil, fmt.Errorf("user has no accessible tenants")
+	}
+
+	// Get document to find its tenant
+	docDAO := dao.NewDocumentDAO()
+	doc, err := docDAO.GetByID(req.DocID)
+	if err != nil || doc == nil {
+		return nil, fmt.Errorf("document not found")
+	}
+
+	// Get knowledge base to find tenant
+	kb, err := s.kbDAO.GetByID(doc.KbID)
+	if err != nil || kb == nil {
+		return nil, fmt.Errorf("knowledge base not found")
+	}
+
+	// Find which tenant this document belongs to
+	var targetTenantID string
+	for _, tenant := range tenants {
+		if tenant.TenantID == kb.TenantID {
+			targetTenantID = tenant.TenantID
+			break
+		}
+	}
+	if targetTenantID == "" {
+		return nil, fmt.Errorf("user does not have access to this document")
+	}
+
+	// Get kbIDs for this tenant
+	kbIDs, err := s.kbDAO.GetKBIDsByTenantID(targetTenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get kb ids: %w", err)
+	}
+
+	indexName := fmt.Sprintf("ragflow_%s", targetTenantID)
+
+	page := getPageNum(req.Page)
+	size := getPageSize(req.Size)
+	keywords := req.Keywords
+
+	// Build search request - same as retrieval test but filtered by doc_id
+	searchReq := &engine.SearchRequest{
+		IndexNames: []string{indexName},
+		Question:   keywords,
+		KbIDs:      kbIDs,
+		DocIDs:     []string{req.DocID},
+		Page:       page,
+		Size:       size,
+		TopK:       size,
+	}
+
+	// Add available_int filter if specified
+	if req.AvailableInt != nil {
+		searchReq.AvailableInt = req.AvailableInt
+	}
+
+	// Execute search through unified engine interface
+	result, err := s.docEngine.Search(ctx, searchReq)
+	if err != nil {
+		return nil, fmt.Errorf("search failed: %w", err)
+	}
+
+	// Convert result to unified response
+	searchResp, ok := result.(*engine.SearchResponse)
+	if !ok {
+		return nil, fmt.Errorf("invalid search response type")
+	}
+
+	// Format output to match Python
+	chunks := make([]map[string]interface{}, 0, len(searchResp.Chunks))
+	for _, chunk := range searchResp.Chunks {
+		// Inline formatChunkForList
+		result := make(map[string]interface{})
+		skipFields := map[string]bool{
+			"_id": true, "authors": true, "_score": true, "SCORE": true,
+			"important_kwd_empty_count": true, "kb_id": true, "mom_id": true, "page_num_int": true,
+		}
+		for k, v := range chunk {
+			if skipFields[k] || strings.HasSuffix(k, "_vec") || strings.Contains(k, "_sm_") || strings.HasSuffix(k, "_ltks") || strings.HasSuffix(k, "_tks") {
+				continue
+			}
+			switch k {
+			case "img_id":
+				if strVal, ok := v.(string); ok {
+					result["image_id"] = strVal
+				} else {
+					result["image_id"] = ""
+				}
+			case "position_int":
+				result["positions"] = v
+			case "id":
+				result["chunk_id"] = v
+			case "content":
+				result["content_with_weight"] = v
+			case "docnm":
+				result["docnm_kwd"] = v
+			case "important_keywords":
+				utility.SetFieldArray(result, "important_kwd", v)
+			case "questions":
+				utility.SetFieldArray(result, "question_kwd", v)
+			case "entities_kwd", "entity_kwd", "entity_type_kwd", "from_entity_kwd",
+				"name_kwd", "raptor_kwd", "removed_kwd",
+				"source_id", "tag_kwd", "to_entity_kwd", "toc_kwd", "doc_type_kwd":
+				if utility.IsEmpty(v) {
+					result[k] = []interface{}{}
+				} else {
+					result[k] = v
+				}
+			default:
+				// Handle _kwd fields that need "###" splitting
+				if strings.HasSuffix(k, "_kwd") && k != "knowledge_graph_kwd" {
+					if strVal, ok := v.(string); ok && strings.Contains(strVal, "###") {
+						parts := strings.Split(strVal, "###")
+						var filtered []interface{}
+						for _, p := range parts {
+							if p != "" {
+								filtered = append(filtered, p)
+							}
+						}
+						result[k] = filtered
+					} else {
+						result[k] = v
+					}
+				} else {
+					result[k] = v
+				}
+			}
+		}
+		chunks = append(chunks, result)
+	}
+
+	// Build document info (matching Python doc.to_dict())
+	timeFormat := "2006-01-02T15:04:05"
+	docInfo := map[string]interface{}{
+		"id":               doc.ID,
+		"thumbnail":        doc.Thumbnail,
+		"kb_id":            doc.KbID,
+		"parser_id":        doc.ParserID,
+		"pipeline_id":      doc.PipelineID,
+		"parser_config":    doc.ParserConfig,
+		"source_type":      doc.SourceType,
+		"type":             doc.Type,
+		"created_by":       doc.CreatedBy,
+		"name":             doc.Name,
+		"location":         doc.Location,
+		"size":             doc.Size,
+		"token_num":        doc.TokenNum,
+		"chunk_num":        doc.ChunkNum,
+		"progress":         utility.JSONFloat64(doc.Progress),
+		"progress_msg":     doc.ProgressMsg,
+		"process_begin_at": utility.FormatTimeToString(doc.ProcessBeginAt, timeFormat),
+		"process_duration": doc.ProcessDuration,
+		"content_hash":     doc.ContentHash,
+		"suffix":           doc.Suffix,
+		"run":              doc.Run,
+		"status":           doc.Status,
+		"create_time":      doc.CreateTime,
+		"create_date":      utility.FormatTimeToString(doc.CreateDate, timeFormat),
+		"update_time":      doc.UpdateTime,
+		"update_date":      utility.FormatTimeToString(doc.UpdateDate, timeFormat),
+	}
+
+	return &ListChunksResponse{
+		Total:  searchResp.Total,
+		Chunks: chunks,
+		Doc:    docInfo,
+	}, nil
+}
+
+// UpdateChunkRequest request for updating a chunk
+type UpdateChunkRequest struct {
+	DatasetID    string                   `json:"dataset_id"`
+	DocumentID   string                   `json:"document_id"`
+	ChunkID      string                   `json:"chunk_id"`
+	Content      *string                  `json:"content,omitempty"`
+	ImportantKwd []string                 `json:"important_keywords,omitempty"`
+	Questions    []string                 `json:"questions,omitempty"`
+	Available    *bool                    `json:"available,omitempty"`
+	Positions    []interface{}             `json:"positions,omitempty"`
+	TagKwd       []string                 `json:"tag_kwd,omitempty"`
+	TagFeas      interface{}              `json:"tag_feas,omitempty"`
+}
+
+// UpdateChunk updates a chunk fields
+func (s *ChunkService) UpdateChunk(req *UpdateChunkRequest, userID string) error {
+	if s.docEngine == nil {
+		return fmt.Errorf("doc engine not initialized")
+	}
+
+	if req.ChunkID == "" {
+		return fmt.Errorf("chunk_id is required")
+	}
+
+	ctx := context.Background()
+
+	// Get user's tenants
+	tenants, err := s.userTenantDAO.GetByUserID(userID)
+	if err != nil {
+		return fmt.Errorf("failed to get user tenants: %w", err)
+	}
+	if len(tenants) == 0 {
+		return fmt.Errorf("user has no accessible tenants")
+	}
+
+	// Find the tenant that owns this dataset
+	var targetTenantID string
+	for _, tenant := range tenants {
+		kb, err := s.kbDAO.GetByIDAndTenantID(req.DatasetID, tenant.TenantID)
+		if err == nil && kb != nil {
+			targetTenantID = tenant.TenantID
+			break
+		}
+	}
+	if targetTenantID == "" {
+		return fmt.Errorf("user does not have access to this dataset")
+	}
+
+	// Verify document belongs to dataset
+	docDAO := dao.NewDocumentDAO()
+	doc, err := docDAO.GetByID(req.DocumentID)
+	if err != nil || doc == nil {
+		return fmt.Errorf("document not found")
+	}
+	if doc.KbID != req.DatasetID {
+		return fmt.Errorf("document does not belong to this dataset")
+	}
+
+	// Fetch existing chunk first (like Python does)
+	indexName := fmt.Sprintf("ragflow_%s", targetTenantID)
+	existingChunk, err := s.docEngine.GetChunk(ctx, indexName, req.ChunkID, []string{req.DatasetID})
+	if err != nil {
+		return fmt.Errorf("failed to get existing chunk: %w", err)
+	}
+
+	existing, ok := existingChunk.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("invalid chunk format")
+	}
+
+	// Build update dict like Python does (doc.py:1476-1523)
+	d := make(map[string]interface{})
+
+	// Content - use new value or existing
+	if req.Content != nil {
+		d["content_with_weight"] = *req.Content
+	} else {
+		if v, ok := existing["content_with_weight"].(string); ok {
+			d["content_with_weight"] = v
+		} else if v, ok := existing["content"].(string); ok {
+			d["content_with_weight"] = v
+		} else {
+			d["content_with_weight"] = ""
+		}
+	}
+
+	// Tokenize content
+	contentStr := d["content_with_weight"].(string)
+	d["content_ltks"], _ = tokenizer.Tokenize(contentStr)
+	d["content_sm_ltks"], _ = tokenizer.FineGrainedTokenize(d["content_ltks"].(string))
+
+	// Important keywords - convert []string to []interface{} for transformChunkFields
+	if req.ImportantKwd != nil {
+		impKwd := make([]interface{}, len(req.ImportantKwd))
+		for i, v := range req.ImportantKwd {
+			impKwd[i] = v
+		}
+		d["important_kwd"] = impKwd
+	}
+
+	// Questions
+	if req.Questions != nil {
+		// Filter out empty questions and trim
+		filteredQuestions := []string{}
+		for _, q := range req.Questions {
+			q = strings.TrimSpace(q)
+			if q != "" {
+				filteredQuestions = append(filteredQuestions, q)
+			}
+		}
+		d["question_kwd"] = filteredQuestions
+	}
+
+	// Available
+	if req.Available != nil {
+		if *req.Available {
+			d["available_int"] = 1
+		} else {
+			d["available_int"] = 0
+		}
+	}
+
+	// Positions
+	if req.Positions != nil {
+		d["position_int"] = req.Positions
+	}
+
+	// Tag keywords
+	if req.TagKwd != nil {
+		d["tag_kwd"] = req.TagKwd
+	}
+
+	// Tag features
+	if req.TagFeas != nil {
+		d["tag_feas"] = req.TagFeas
+	}
+
+	// Always include id
+	d["id"] = req.ChunkID
+
+	// Call update
+	condition := map[string]interface{}{
+		"id": req.ChunkID,
+	}
+
+	err = s.docEngine.UpdateDataset(ctx, condition, d, indexName, req.DatasetID)
+	if err != nil {
+		return fmt.Errorf("failed to update chunk: %w", err)
+	}
+
+	return nil
+}
+
+// RemoveChunksRequest request for removing chunks
+type RemoveChunksRequest struct {
+	DocID      string   `json:"doc_id"`
+	ChunkIDs   []string `json:"chunk_ids,omitempty"`
+	DeleteAll  bool     `json:"delete_all,omitempty"`
+}
+
+// RemoveChunks removes chunks from the dataset table.
+// If ChunkIDs is empty and DeleteAll is true, removes all chunks for the document.
+// Otherwise removes only the specified chunks.
+func (s *ChunkService) RemoveChunks(req *RemoveChunksRequest, userID string) (int64, error) {
+	if s.docEngine == nil {
+		return 0, fmt.Errorf("doc engine not initialized")
+	}
+
+	if req.DocID == "" {
+		return 0, fmt.Errorf("doc_id is required")
+	}
+
+	ctx := context.Background()
+
+	// Get user's tenants
+	tenants, err := s.userTenantDAO.GetByUserID(userID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get user tenants: %w", err)
+	}
+	if len(tenants) == 0 {
+		return 0, fmt.Errorf("user has no accessible tenants")
+	}
+
+	// Verify document exists and belongs to a dataset (do this first to get doc.KbID)
+	docDAO := dao.NewDocumentDAO()
+	doc, err := docDAO.GetByID(req.DocID)
+	if err != nil || doc == nil {
+		return 0, fmt.Errorf("document not found")
+	}
+
+	// Find the tenant that owns this document
+	var targetTenantID string
+	for _, tenant := range tenants {
+		kb, err := s.kbDAO.GetByIDAndTenantID(doc.KbID, tenant.TenantID)
+		if err == nil && kb != nil {
+			targetTenantID = tenant.TenantID
+			break
+		}
+	}
+	if targetTenantID == "" {
+		return 0, fmt.Errorf("user does not have access to this document")
+	}
+
+	indexName := fmt.Sprintf("ragflow_%s", targetTenantID)
+
+	// Build condition
+	condition := make(map[string]interface{})
+	switch {
+	case len(req.ChunkIDs) > 0 && req.DeleteAll:
+		return 0, fmt.Errorf("chunk_ids and delete_all are mutually exclusive")
+	case len(req.ChunkIDs) > 0:
+		// Delete specific chunks - convert []string to []interface{} for buildFilterFromCondition
+		chunkIDsIf := make([]interface{}, len(req.ChunkIDs))
+		for i, id := range req.ChunkIDs {
+			chunkIDsIf[i] = id
+		}
+		condition["id"] = chunkIDsIf
+		condition["doc_id"] = req.DocID
+	case req.DeleteAll:
+		// Delete all chunks for this document
+		condition["doc_id"] = req.DocID
+	default:
+		return 0, fmt.Errorf("either chunk_ids or delete_all must be provided")
+	}
+
+	deletedCount, err := s.docEngine.Delete(ctx, condition, indexName, doc.KbID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete chunks: %w", err)
+	}
+
+	return deletedCount, nil
 }

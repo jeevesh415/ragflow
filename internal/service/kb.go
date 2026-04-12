@@ -17,16 +17,17 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"ragflow/internal/common"
 	"ragflow/internal/dao"
-	"ragflow/internal/model"
+	"ragflow/internal/engine"
+	"ragflow/internal/entity"
+
 	"ragflow/internal/utility"
 	"strings"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // KnowledgebaseService service class for managing dataset operations
@@ -36,6 +37,7 @@ type KnowledgebaseService struct {
 	userDAO       *dao.UserDAO
 	tenantDAO     *dao.TenantDAO
 	connectorDAO  *dao.ConnectorDAO
+	docEngine     engine.DocEngine
 }
 
 // NewKnowledgebaseService creates a new knowledge base service
@@ -46,6 +48,7 @@ func NewKnowledgebaseService() *KnowledgebaseService {
 		userDAO:       dao.NewUserDAO(),
 		tenantDAO:     dao.NewTenantDAO(),
 		connectorDAO:  dao.NewConnectorDAO(),
+		docEngine:     engine.Get(),
 	}
 }
 
@@ -118,8 +121,8 @@ func (s *KnowledgebaseService) CreateKB(req *CreateKBRequest, tenantID string) (
 	}
 
 	// Check name length (using UTF-8 byte length like Python)
-	if len(name) > model.DatasetNameLimit {
-		return nil, common.CodeDataError, fmt.Errorf("Dataset name length is %d which is large than %d", len(name), model.DatasetNameLimit)
+	if len(name) > entity.DatasetNameLimit {
+		return nil, common.CodeDataError, fmt.Errorf("Dataset name length is %d which is large than %d", len(name), entity.DatasetNameLimit)
 	}
 
 	// Verify tenant exists
@@ -142,12 +145,12 @@ func (s *KnowledgebaseService) CreateKB(req *CreateKBRequest, tenantID string) (
 	parserConfig["llm_id"] = tenant.LLMID
 
 	// Generate KB ID
-	kbID := strings.ReplaceAll(uuid.New().String(), "-", "")
+	kbID := common.GenerateUUID()
 
 	// Create knowledge base model
 	now := time.Now().Unix()
 	nowDate := time.Now().Truncate(time.Second)
-	kb := &model.Knowledgebase{
+	kb := &entity.Knowledgebase{
 		ID:           kbID,
 		Name:         duplicateName,
 		TenantID:     tenantID,
@@ -161,7 +164,7 @@ func (s *KnowledgebaseService) CreateKB(req *CreateKBRequest, tenantID string) (
 	kb.UpdateTime = &now
 	kb.CreateDate = &nowDate
 	kb.UpdateDate = &nowDate
-	status := string(model.StatusValid)
+	status := string(entity.StatusValid)
 	kb.Status = &status
 
 	// Set optional fields
@@ -179,11 +182,76 @@ func (s *KnowledgebaseService) CreateKB(req *CreateKBRequest, tenantID string) (
 	}
 
 	// Create in database
-	if err := s.kbDAO.Create(kb); err != nil {
+	if err = s.kbDAO.Create(kb); err != nil {
 		return nil, common.CodeServerError, fmt.Errorf("failed to create knowledge base: %w", err)
 	}
 
 	return &CreateKBResponse{KBID: kbID}, common.CodeSuccess, nil
+}
+
+// CreateDatasetTableRequest represents the request for creating a dataset table
+type CreateDatasetTableRequest struct {
+	KBID       string `json:"kb_id" binding:"required"`
+	VectorSize int    `json:"vector_size" binding:"required"`
+	ParserID   string `json:"parser_id,omitempty"`
+}
+
+// CreateDatasetInDocEngineResponse represents the response for creating a dataset table
+type CreateDatasetInDocEngineResponse struct {
+	KBID       string `json:"kb_id"`
+	TableName  string `json:"table_name"`
+	VectorSize int    `json:"vector_size"`
+}
+
+// CreateDatasetInDocEngine creates a table in the document engine for a knowledge base
+func (s *KnowledgebaseService) CreateDatasetInDocEngine(req *CreateDatasetTableRequest) (*CreateDatasetInDocEngineResponse, common.ErrorCode, error) {
+	// Get KB to find tenant_id for building table name
+	kb, err := s.kbDAO.GetByID(req.KBID)
+	if err != nil {
+		return nil, common.CodeDataError, fmt.Errorf("knowledge base not found: %s", req.KBID)
+	}
+
+	// vector_size is required
+	vecSize := req.VectorSize
+	if vecSize <= 0 {
+		return nil, common.CodeDataError, fmt.Errorf("vector_size must be positive")
+	}
+
+	// Build table name prefix: ragflow_<tenant_id>
+	tableName := fmt.Sprintf("ragflow_%s", kb.TenantID)
+
+	// Call document engine to create table
+	// Full table name will be built as "{tableName}_{kb_id}"
+	err = s.docEngine.CreateDataset(context.Background(), tableName, req.KBID, vecSize, req.ParserID)
+	if err != nil {
+		return nil, common.CodeServerError, fmt.Errorf("failed to create dataset: %w", err)
+	}
+
+	return &CreateDatasetInDocEngineResponse{
+		KBID:       req.KBID,
+		TableName:  tableName,
+		VectorSize: vecSize,
+	}, common.CodeSuccess, nil
+}
+
+// DeleteDatasetInDocEngine deletes the table in the document engine for a knowledge base
+func (s *KnowledgebaseService) DeleteDatasetInDocEngine(kbID string) (common.ErrorCode, error) {
+	// Get KB to find tenant_id for building table name
+	kb, err := s.kbDAO.GetByID(kbID)
+	if err != nil {
+		return common.CodeDataError, fmt.Errorf("knowledge base not found: %s", kbID)
+	}
+
+	// Build table name: ragflow_<tenant_id>_<kb_id>
+	tableName := fmt.Sprintf("ragflow_%s_%s", kb.TenantID, kbID)
+
+	// Call document engine to delete table
+	err = s.docEngine.DropTable(context.Background(), tableName)
+	if err != nil {
+		return common.CodeServerError, fmt.Errorf("failed to delete table: %w", err)
+	}
+
+	return common.CodeSuccess, nil
 }
 
 // UpdateKB updates an existing knowledge base
@@ -201,8 +269,8 @@ func (s *KnowledgebaseService) UpdateKB(req *UpdateKBRequest, userID string) (ma
 	}
 
 	// Check name length
-	if len(name) > model.DatasetNameLimit {
-		return nil, common.CodeDataError, fmt.Errorf("Dataset name length is %d which is large than %d", len(name), model.DatasetNameLimit)
+	if len(name) > entity.DatasetNameLimit {
+		return nil, common.CodeDataError, fmt.Errorf("Dataset name length is %d which is large than %d", len(name), entity.DatasetNameLimit)
 	}
 
 	// Check authorization
@@ -308,7 +376,7 @@ func (s *KnowledgebaseService) UpdateMetadataSetting(req *UpdateMetadataSettingR
 
 // GetDetail retrieves detailed information about a knowledge base
 // This matches the Python kb_detail endpoint in kb_app.py
-func (s *KnowledgebaseService) GetDetail(kbID, userID string) (*model.KnowledgebaseDetail, common.ErrorCode, error) {
+func (s *KnowledgebaseService) GetDetail(kbID, userID string) (*entity.KnowledgebaseDetail, common.ErrorCode, error) {
 	// Check authorization
 	if !s.kbDAO.Accessible(kbID, userID) {
 		return nil, common.CodeOperatingError, errors.New("only owner of dataset authorized for this operation")
@@ -329,7 +397,7 @@ func (s *KnowledgebaseService) GetDetail(kbID, userID string) (*model.Knowledgeb
 // ListKbs lists knowledge bases with pagination and filtering
 // This matches the Python list endpoint in kb_app.py
 func (s *KnowledgebaseService) ListKbs(keywords string, page int, pageSize int, parserID string, orderby string, desc bool, ownerIDs []string, userID string) (*ListKbsResponse, common.ErrorCode, error) {
-	var kbs []*model.KnowledgebaseListItem
+	var kbs []*entity.KnowledgebaseListItem
 	var total int64
 	var err error
 
@@ -405,8 +473,13 @@ func (s *KnowledgebaseService) Accessible(kbID, userID string) bool {
 	return s.kbDAO.Accessible(kbID, userID)
 }
 
+// RemoveTag removes a tag from documents in a dataset
+func (s *KnowledgebaseService) RemoveTag(condition map[string]interface{}, newValue map[string]interface{}, indexName, kbID string) error {
+	return s.docEngine.UpdateDataset(context.Background(), condition, newValue, indexName, kbID)
+}
+
 // GetByID retrieves a knowledge base by ID
-func (s *KnowledgebaseService) GetByID(kbID string) (*model.Knowledgebase, error) {
+func (s *KnowledgebaseService) GetByID(kbID string) (*entity.Knowledgebase, error) {
 	return s.kbDAO.GetByID(kbID)
 }
 
@@ -476,19 +549,14 @@ func mergeParserConfig(base, override map[string]interface{}) map[string]interfa
 	return result
 }
 
-// GenerateUUID generates a UUID string without dashes
-func GenerateUUID() string {
-	return strings.ReplaceAll(uuid.New().String(), "-", "")
-}
-
 // GetUserByToken gets user by authorization token
-func (s *KnowledgebaseService) GetUserByToken(authorization string) (*model.User, common.ErrorCode, error) {
+func (s *KnowledgebaseService) GetUserByToken(authorization string) (*entity.User, common.ErrorCode, error) {
 	userService := NewUserService()
 	return userService.GetUserByToken(authorization)
 }
 
 // GetUserByID gets user by ID
-func (s *KnowledgebaseService) GetUserByID(id string) (*model.User, error) {
+func (s *KnowledgebaseService) GetUserByID(id string) (*entity.User, error) {
 	return s.userDAO.GetByAccessToken(id)
 }
 
@@ -503,7 +571,7 @@ func (s *KnowledgebaseService) GetConnectorsByTenantID(tenantID string) ([]*dao.
 }
 
 // GetKBList retrieves knowledge bases with ID and name filtering
-func (s *KnowledgebaseService) GetKBList(tenantIDs []string, userID string, page, pageSize int, orderby string, desc bool, id, name string) ([]*model.Knowledgebase, int64, common.ErrorCode, error) {
+func (s *KnowledgebaseService) GetKBList(tenantIDs []string, userID string, page, pageSize int, orderby string, desc bool, id, name string) ([]*entity.Knowledgebase, int64, common.ErrorCode, error) {
 	kbs, total, err := s.kbDAO.GetList(tenantIDs, userID, page, pageSize, orderby, desc, id, name)
 	if err != nil {
 		return nil, 0, common.CodeServerError, err
@@ -512,12 +580,12 @@ func (s *KnowledgebaseService) GetKBList(tenantIDs []string, userID string, page
 }
 
 // GetKBByIDAndUserID retrieves a knowledge base by ID and user ID
-func (s *KnowledgebaseService) GetKBByIDAndUserID(kbID, userID string) ([]*model.Knowledgebase, error) {
+func (s *KnowledgebaseService) GetKBByIDAndUserID(kbID, userID string) ([]*entity.Knowledgebase, error) {
 	return s.kbDAO.GetKBByIDAndUserID(kbID, userID)
 }
 
 // GetKBByNameAndUserID retrieves a knowledge base by name and user ID
-func (s *KnowledgebaseService) GetKBByNameAndUserID(kbName, userID string) ([]*model.Knowledgebase, error) {
+func (s *KnowledgebaseService) GetKBByNameAndUserID(kbName, userID string) ([]*entity.Knowledgebase, error) {
 	return s.kbDAO.GetKBByNameAndUserID(kbName, userID)
 }
 

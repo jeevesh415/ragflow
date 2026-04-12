@@ -1,5 +1,5 @@
 #
-#  Copyright 2024 The InfiniFlow Authors. All Rights Reserved.
+#  Copyright 2026 The InfiniFlow Authors. All Rights Reserved.
 #
 #  Licensed under the Apache License, Version 2.0 (the "License");
 #  you may not use this file except in compliance with the License.
@@ -15,39 +15,40 @@
 #
 import json
 import os.path
-import pathlib
 import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from quart import request, make_response
+
+from quart import make_response, request
+
 from api.apps import current_user, login_required
 from api.common.check_team_permission import check_kb_team_permission
 from api.constants import FILE_NAME_LEN_LIMIT, IMG_BASE64_PREFIX
 from api.db import VALID_FILE_TYPES, FileType
 from api.db.db_models import Task
 from api.db.services import duplicate_name
-from api.db.services.document_service import DocumentService, doc_upload_and_parse
 from api.db.services.doc_metadata_service import DocMetadataService
-from common.metadata_utils import meta_filter, convert_conditions, turn2jsonschema
+from api.db.services.document_service import DocumentService, doc_upload_and_parse
 from api.db.services.file2document_service import File2DocumentService
 from api.db.services.file_service import FileService
 from api.db.services.knowledgebase_service import KnowledgebaseService
 from api.db.services.task_service import TaskService, cancel_all_task_of
 from api.db.services.user_service import UserTenantService
-from common.misc_utils import get_uuid, thread_pool_exec
 from api.utils.api_utils import (
     get_data_error_result,
     get_json_result,
+    get_request_json,
     server_error_response,
     validate_request,
-    get_request_json,
 )
 from api.utils.file_utils import filename_type, thumbnail
-from common.file_utils import get_project_base_directory
-from common.constants import RetCode, VALID_TASK_STATUS, ParserType, TaskStatus
 from api.utils.web_utils import CONTENT_TYPE_MAP, apply_safe_file_response_headers, html2pdf, is_valid_url
-from deepdoc.parser.html_parser import RAGFlowHtmlParser
-from rag.nlp import search, rag_tokenizer
 from common import settings
+from common.constants import SANDBOX_ARTIFACT_BUCKET, VALID_TASK_STATUS, ParserType, RetCode, TaskStatus
+from common.file_utils import get_project_base_directory
+from common.metadata_utils import convert_conditions, meta_filter, turn2jsonschema
+from common.misc_utils import get_uuid, thread_pool_exec
+from deepdoc.parser.html_parser import RAGFlowHtmlParser
+from rag.nlp import search
 
 
 def _is_safe_download_filename(name: str) -> bool:
@@ -75,6 +76,7 @@ async def upload():
         return get_json_result(data=False, message="No file part!", code=RetCode.ARGUMENT_ERROR)
 
     file_objs = files.getlist("file")
+
     def _close_file_objs(objs):
         for obj in objs:
             try:
@@ -84,6 +86,7 @@ async def upload():
                     obj.stream.close()
                 except Exception:
                     pass
+
     for file_obj in file_objs:
         if file_obj.filename == "":
             _close_file_objs(file_objs)
@@ -236,10 +239,9 @@ async def create():
 @manager.route("/list", methods=["POST"])  # noqa: F821
 @login_required
 async def list_docs():
-    kb_id = request.args.get("kb_id")
+    kb_id = request.args.get("id")
     if not kb_id:
-        return get_json_result(data=False, message='Lack of "KB ID"', code=RetCode.ARGUMENT_ERROR)
-        
+        return get_json_result(data=False, message='Dataset ID is required for listing files.', code=RetCode.ARGUMENT_ERROR)
     tenants = UserTenantService.query(user_id=current_user.id)
     for tenant in tenants:
         if KnowledgebaseService.query(tenant_id=tenant.tenant_id, id=kb_id):
@@ -421,29 +423,6 @@ async def doc_infos():
     return get_json_result(data=docs_list)
 
 
-@manager.route("/metadata/summary", methods=["POST"])  # noqa: F821
-@login_required
-async def metadata_summary():
-    req = await get_request_json()
-    kb_id = req.get("kb_id")
-    doc_ids = req.get("doc_ids")
-    if not kb_id:
-        return get_json_result(data=False, message='Lack of "KB ID"', code=RetCode.ARGUMENT_ERROR)
-
-    tenants = UserTenantService.query(user_id=current_user.id)
-    for tenant in tenants:
-        if KnowledgebaseService.query(tenant_id=tenant.tenant_id, id=kb_id):
-            break
-    else:
-        return get_json_result(data=False, message="Only owner of dataset authorized for this operation.", code=RetCode.OPERATING_ERROR)
-
-    try:
-        summary = DocMetadataService.get_metadata_summary(kb_id, doc_ids)
-        return get_json_result(data={"summary": summary})
-    except Exception as e:
-        return server_error_response(e)
-
-
 @manager.route("/metadata/update", methods=["POST"])  # noqa: F821
 @login_required
 @validate_request("doc_ids")
@@ -608,6 +587,7 @@ async def run():
     req = await get_request_json()
     uid = current_user.id
     try:
+
         def _run_sync():
             for doc_id in req["doc_ids"]:
                 if not DocumentService.accessible(doc_id, uid):
@@ -662,60 +642,6 @@ async def run():
     except Exception as e:
         return server_error_response(e)
 
-
-@manager.route("/rename", methods=["POST"])  # noqa: F821
-@login_required
-@validate_request("doc_id", "name")
-async def rename():
-    req = await get_request_json()
-    uid = current_user.id
-    try:
-        def _rename_sync():
-            if not DocumentService.accessible(req["doc_id"], uid):
-                return get_json_result(data=False, message="No authorization.", code=RetCode.AUTHENTICATION_ERROR)
-
-            e, doc = DocumentService.get_by_id(req["doc_id"])
-            if not e:
-                return get_data_error_result(message="Document not found!")
-            if pathlib.Path(req["name"].lower()).suffix != pathlib.Path(doc.name.lower()).suffix:
-                return get_json_result(data=False, message="The extension of file can't be changed", code=RetCode.ARGUMENT_ERROR)
-            if len(req["name"].encode("utf-8")) > FILE_NAME_LEN_LIMIT:
-                return get_json_result(data=False, message=f"File name must be {FILE_NAME_LEN_LIMIT} bytes or less.", code=RetCode.ARGUMENT_ERROR)
-
-            for d in DocumentService.query(name=req["name"], kb_id=doc.kb_id):
-                if d.name == req["name"]:
-                    return get_data_error_result(message="Duplicated document name in the same dataset.")
-
-            if not DocumentService.update_by_id(req["doc_id"], {"name": req["name"]}):
-                return get_data_error_result(message="Database error (Document rename)!")
-
-            informs = File2DocumentService.get_by_document_id(req["doc_id"])
-            if informs:
-                e, file = FileService.get_by_id(informs[0].file_id)
-                FileService.update_by_id(file.id, {"name": req["name"]})
-
-            tenant_id = DocumentService.get_tenant_id(req["doc_id"])
-            title_tks = rag_tokenizer.tokenize(req["name"])
-            es_body = {
-                "docnm_kwd": req["name"],
-                "title_tks": title_tks,
-                "title_sm_tks": rag_tokenizer.fine_grained_tokenize(title_tks),
-            }
-            if settings.docStoreConn.index_exist(search.index_name(tenant_id), doc.kb_id):
-                settings.docStoreConn.update(
-                    {"doc_id": req["doc_id"]},
-                    es_body,
-                    search.index_name(tenant_id),
-                    doc.kb_id,
-                )
-            return get_json_result(data=True)
-
-        return await thread_pool_exec(_rename_sync)
-
-    except Exception as e:
-        return server_error_response(e)
-
-
 @manager.route("/get/<doc_id>", methods=["GET"])  # noqa: F821
 @login_required
 async def get(doc_id):
@@ -760,7 +686,6 @@ async def download_attachment(attachment_id):
 @login_required
 @validate_request("doc_id")
 async def change_parser():
-
     req = await get_request_json()
     if not DocumentService.accessible(req["doc_id"], current_user.id):
         return get_json_result(data=False, message="No authorization.", code=RetCode.AUTHENTICATION_ERROR)
@@ -822,6 +747,44 @@ async def get_image(image_id):
         data = await thread_pool_exec(settings.STORAGE_IMPL.get, bkt, nm)
         response = await make_response(data)
         response.headers.set("Content-Type", "image/JPEG")
+        return response
+    except Exception as e:
+        return server_error_response(e)
+
+
+ARTIFACT_CONTENT_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".svg": "image/svg+xml",
+    ".pdf": "application/pdf",
+    ".csv": "text/csv",
+    ".json": "application/json",
+    ".html": "text/html",
+}
+
+
+@manager.route("/artifact/<filename>", methods=["GET"])  # noqa: F821
+@login_required
+async def get_artifact(filename):
+    try:
+        bucket = SANDBOX_ARTIFACT_BUCKET
+        # Validate filename: must be uuid hex + allowed extension, nothing else
+        basename = os.path.basename(filename)
+        if basename != filename or "/" in filename or "\\" in filename:
+            return get_data_error_result(message="Invalid filename.")
+        ext = os.path.splitext(basename)[1].lower()
+        if ext not in ARTIFACT_CONTENT_TYPES:
+            return get_data_error_result(message="Invalid file type.")
+        data = await thread_pool_exec(settings.STORAGE_IMPL.get, bucket, basename)
+        if not data:
+            return get_data_error_result(message="Artifact not found.")
+        content_type = ARTIFACT_CONTENT_TYPES.get(ext, "application/octet-stream")
+        response = await make_response(data)
+        safe_filename = re.sub(r"[^\w.\-]", "_", basename)
+        apply_safe_file_response_headers(response, content_type, ext)
+        if not response.headers.get("Content-Disposition"):
+            response.headers.set("Content-Disposition", f'inline; filename="{safe_filename}"')
         return response
     except Exception as e:
         return server_error_response(e)
@@ -940,10 +903,34 @@ async def set_meta():
 
 
 @manager.route("/upload_info", methods=["POST"])  # noqa: F821
+@login_required
 async def upload_info():
     files = await request.files
-    file = files['file'] if files and files.get("file") else None
+    file_objs = files.getlist("file") if files and files.get("file") else []
+    url = request.args.get("url")
+
+    if file_objs and url:
+        return get_json_result(
+            data=False,
+            message="Provide either multipart file(s) or ?url=..., not both.",
+            code=RetCode.BAD_REQUEST,
+        )
+
+    if not file_objs and not url:
+        return get_json_result(
+            data=False,
+            message="Missing input: provide multipart file(s) or url",
+            code=RetCode.BAD_REQUEST,
+        )
+
     try:
-        return get_json_result(data=FileService.upload_info(current_user.id, file, request.args.get("url")))
+        if url and not file_objs:
+            return get_json_result(data=FileService.upload_info(current_user.id, None, url))
+
+        if len(file_objs) == 1:
+            return get_json_result(data=FileService.upload_info(current_user.id, file_objs[0], None))
+
+        results = [FileService.upload_info(current_user.id, f, None) for f in file_objs]
+        return get_json_result(data=results)
     except Exception as e:
-        return  server_error_response(e)
+        return server_error_response(e)

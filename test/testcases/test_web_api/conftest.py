@@ -18,12 +18,12 @@ from time import sleep
 from ragflow_sdk import RAGFlow
 from configs import HOST_ADDRESS, VERSION
 import pytest
-from common import (
+from test_common import (
     batch_add_chunks,
     batch_create_datasets,
     bulk_upload_documents,
     delete_chunks,
-    delete_dialogs,
+    delete_chats,
     list_chunks,
     list_documents,
     list_datasets,
@@ -49,7 +49,7 @@ from utils.file_utils import (
 
 @wait_for(30, 1, "Document parsing timeout")
 def condition(_auth, _kb_id):
-    res = list_documents(_auth, {"kb_id": _kb_id})
+    res = list_documents(_auth, {"id": _kb_id})
     for doc in res["data"]["docs"]:
         if doc["run"] != "3":
             return False
@@ -112,9 +112,9 @@ def clear_datasets(request: FixtureRequest, WebApiAuth: RAGFlowWebApiAuth):
 
 
 @pytest.fixture(scope="function")
-def clear_dialogs(request, WebApiAuth):
+def clear_chats(request, WebApiAuth):
     def cleanup():
-        delete_dialogs(WebApiAuth)
+        delete_chats(WebApiAuth)
 
     request.addfinalizer(cleanup)
 

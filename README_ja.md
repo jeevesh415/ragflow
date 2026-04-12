@@ -14,6 +14,7 @@
   <a href="./README_pt_br.md"><img alt="Português(Brasil)" src="https://img.shields.io/badge/Português(Brasil)-DFE0E5"></a>
   <a href="./README_fr.md"><img alt="README en Français" src="https://img.shields.io/badge/Français-DFE0E5"></a>
   <a href="./README_ar.md"><img alt="README in Arabic" src="https://img.shields.io/badge/Arabic-DFE0E5"></a>
+  <a href="./README_tr.md"><img alt="Türkçe README" src="https://img.shields.io/badge/Türkçe-DFE0E5"></a>
 </p>
 
 <p align="center">
@@ -68,6 +69,7 @@
 
 ## 🔥 最新情報
 
+- 2026-03-24 [RAGFlow Skill on OpenClaw](https://clawhub.ai/yingfeng/ragflow-skill) — OpenClaw経由でRAGFlowデータセットにアクセスする公式スキルを提供。
 - 2025-12-26 AIエージェントの「メモリ」機能をサポート。
 - 2025-11-19 Gemini 3 Proをサポートしています。
 - 2025-11-12 Confluence、S3、Notion、Discord、Google Drive からのデータ同期をサポートします。
@@ -301,7 +303,7 @@ docker build --platform linux/amd64 \
    git clone https://github.com/infiniflow/ragflow.git
    cd ragflow/
    uv sync --python 3.12 # install RAGFlow dependent python modules
-   uv run download_deps.py
+   uv run python3 download_deps.py
    pre-commit install
    ```
 3. Docker Compose を使用して依存サービス（MinIO、Elasticsearch、Redis、MySQL）を起動する:

@@ -1,5 +1,5 @@
 #
-#  Copyright 2025 The InfiniFlow Authors. All Rights Reserved.
+#  Copyright 2026 The InfiniFlow Authors. All Rights Reserved.
 #
 #  Licensed under the Apache License, Version 2.0 (the "License");
 #  you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ from types import ModuleType, SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pytest
-from common import list_datasets, upload_documents
+from test_common import list_datasets, upload_documents
 from configs import DOCUMENT_NAME_LIMIT, INVALID_API_TOKEN
 from libs.auth import RAGFlowWebApiAuth
 from utils.file_utils import create_txt_file
@@ -225,9 +225,10 @@ class _DummyFile:
 
 
 class _DummyRequest:
-    def __init__(self, form=None, files=None):
+    def __init__(self, form=None, files=None, args=None):
         self._form = form or {}
         self._files = files or _DummyFiles()
+        self.args = args or {}
 
     @property
     def form(self):

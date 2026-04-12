@@ -1385,7 +1385,7 @@ async def main():
 /___/_/ /_/\__, /\___/____/\__/_/\____/_/ /_/  /____/\___/_/    |___/\___/_/
           /____/
     """)
-    logging.info(f'RAGFlow version: {get_ragflow_version()}')
+    logging.info(f'RAGFlow ingestion version: {get_ragflow_version()}')
     show_configs()
     settings.init_settings()
     settings.check_and_install_torch()
@@ -1422,4 +1422,8 @@ async def main():
 if __name__ == "__main__":
     faulthandler.enable()
     init_root_logger(CONSUMER_NAME)
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logging.exception(f"Unhandled exception: {e}")
+        sys.exit(1)

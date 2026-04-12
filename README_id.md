@@ -14,6 +14,7 @@
   <a href="./README_pt_br.md"><img alt="Português(Brasil)" src="https://img.shields.io/badge/Português(Brasil)-DFE0E5"></a>
   <a href="./README_fr.md"><img alt="README en Français" src="https://img.shields.io/badge/Français-DFE0E5"></a>
   <a href="./README_ar.md"><img alt="README in Arabic" src="https://img.shields.io/badge/Arabic-DFE0E5"></a>
+  <a href="./README_tr.md"><img alt="Türkçe README" src="https://img.shields.io/badge/Türkçe-DFE0E5"></a>
 </p>
 
 <p align="center">
@@ -87,6 +88,7 @@ Coba demo kami di [https://cloud.ragflow.io](https://cloud.ragflow.io).
 
 ## 🔥 Pembaruan Terbaru
 
+- 2026-03-24 [RAGFlow Skill on OpenClaw](https://clawhub.ai/yingfeng/ragflow-skill) — Menyediakan skill resmi untuk mengakses dataset RAGFlow melalui OpenClaw.
 - 2025-12-26 Mendukung 'Memori' untuk agen AI.
 - 2025-11-19 Mendukung Gemini 3 Pro.
 - 2025-11-12 Mendukung sinkronisasi data dari Confluence, S3, Notion, Discord, Google Drive.
@@ -301,7 +303,7 @@ docker build --platform linux/amd64 \
    git clone https://github.com/infiniflow/ragflow.git
    cd ragflow/
    uv sync --python 3.12 # install RAGFlow dependent python modules
-   uv run download_deps.py
+   uv run python3 download_deps.py
    pre-commit install
    ```
 3. Jalankan aplikasi yang diperlukan (MinIO, Elasticsearch, Redis, dan MySQL) menggunakan Docker Compose:

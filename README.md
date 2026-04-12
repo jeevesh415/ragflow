@@ -14,6 +14,7 @@
   <a href="./README_pt_br.md"><img alt="Português(Brasil)" src="https://img.shields.io/badge/Português(Brasil)-DFE0E5"></a>
   <a href="./README_fr.md"><img alt="README en Français" src="https://img.shields.io/badge/Français-DFE0E5"></a>
   <a href="./README_ar.md"><img alt="README in Arabic" src="https://img.shields.io/badge/Arabic-DFE0E5"></a>
+  <a href="./README_tr.md"><img alt="Türkçe README" src="https://img.shields.io/badge/Türkçe-DFE0E5"></a>
 </p>
 
 <p align="center">
@@ -87,6 +88,7 @@ Try our demo at [https://cloud.ragflow.io](https://cloud.ragflow.io).
 
 ## 🔥 Latest Updates
 
+- 2026-03-24 [RAGFlow Skill on OpenClaw](https://clawhub.ai/yingfeng/ragflow-skill) — Provides an official skill to access RAGFlow datasets via OpenClaw.
 - 2025-12-26 Supports 'Memory' for AI agent.
 - 2025-11-19 Supports Gemini 3 Pro.
 - 2025-11-12 Supports data synchronization from Confluence, S3, Notion, Discord, Google Drive.
@@ -327,7 +329,7 @@ docker build --platform linux/amd64 \
    git clone https://github.com/infiniflow/ragflow.git
    cd ragflow/
    uv sync --python 3.12 # install RAGFlow dependent python modules
-   uv run download_deps.py
+   uv run python3 download_deps.py
    pre-commit install
    ```
 3. Launch the dependent services (MinIO, Elasticsearch, Redis, and MySQL) using Docker Compose:

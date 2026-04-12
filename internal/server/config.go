@@ -18,6 +18,7 @@ package server
 
 import (
 	"fmt"
+	"net"
 	"net/mail"
 	"net/url"
 	"os"
@@ -135,9 +136,11 @@ type ElasticsearchConfig struct {
 
 // InfinityConfig Infinity configuration
 type InfinityConfig struct {
-	URI          string `mapstructure:"uri"`
-	PostgresPort int    `mapstructure:"postgres_port"`
-	DBName       string `mapstructure:"db_name"`
+	URI                    string `mapstructure:"uri"`
+	PostgresPort           int    `mapstructure:"postgres_port"`
+	DBName                 string `mapstructure:"db_name"`
+	MappingFileName        string `mapstructure:"mapping_file_name"`
+	DocMetaMappingFileName string `mapstructure:"doc_meta_mapping_file_name"`
 }
 
 type StorageType string
@@ -159,8 +162,8 @@ const (
 // OSSConfig holds Aliyun OSS storage configuration
 // OSS is compatible with S3 API
 type OSSConfig struct {
-	AccessKeyID      string `mapstructure:"access_key"`        // OSS Access Key ID
-	SecretAccessKey  string `mapstructure:"secret_key"`        // OSS Secret Access Key
+	AccessKey        string `mapstructure:"access_key"`        // OSS Access Key ID
+	SecretKey        string `mapstructure:"secret_key"`        // OSS Secret Access Key
 	EndpointURL      string `mapstructure:"endpoint_url"`      // OSS Endpoint (e.g., "https://oss-cn-hangzhou.aliyuncs.com")
 	Region           string `mapstructure:"region"`            // Region (e.g., "cn-hangzhou")
 	Bucket           string `mapstructure:"bucket"`            // Default bucket (optional)
@@ -176,16 +179,17 @@ type MinioConfig struct {
 	Password   string `mapstructure:"password"`    // Secret key
 	Secure     bool   `mapstructure:"secure"`      // Use HTTPS
 	Verify     bool   `mapstructure:"verify"`      // Verify SSL certificates
+	Region     string `mapstructure:"region"`      // optional
 	Bucket     string `mapstructure:"bucket"`      // Default bucket (optional)
 	PrefixPath string `mapstructure:"prefix_path"` // Path prefix (optional)
 }
 
 // S3Config holds AWS S3 storage configuration
 type S3Config struct {
-	AccessKeyID      string `mapstructure:"access_key"`        // AWS Access Key ID
-	SecretAccessKey  string `mapstructure:"secret_key"`        // AWS Secret Access Key
-	SessionToken     string `mapstructure:"session_token"`     // AWS Session Token (optional)
+	AccessKey        string `mapstructure:"access_key"`        // AWS Access Key ID
+	SecretKey        string `mapstructure:"secret_key"`        // AWS Secret Access Key
 	Region           string `mapstructure:"region_name"`       // AWS Region
+	SessionToken     string `mapstructure:"session_token"`     // AWS Session Token (optional)
 	EndpointURL      string `mapstructure:"endpoint_url"`      // Custom endpoint (optional)
 	SignatureVersion string `mapstructure:"signature_version"` // Signature version
 	AddressingStyle  string `mapstructure:"addressing_style"`  // Addressing style
@@ -211,7 +215,7 @@ var (
 // Init initialize configuration
 func Init(configPath string) error {
 
-	err := FromConfigFile("")
+	err := FromConfigFile(configPath)
 	if err != nil {
 		return err
 	}
@@ -433,8 +437,47 @@ func FromEnvironments() error {
 		globalConfig.StorageEngine.Type = StorageS3
 	case "oss":
 		globalConfig.StorageEngine.Type = StorageOSS
+	case "":
+		// Default
+		if globalConfig.StorageEngine.Type == "" {
+			globalConfig.StorageEngine.Type = StorageMinio
+		}
 	default:
 		return fmt.Errorf("invalid storage type: %s", storageType)
+	}
+
+	// Minio
+	minioIP := strings.ToLower(os.Getenv("MINIO_IP"))
+	if minioIP != "" {
+		if globalConfig.StorageEngine.Minio == nil {
+			return fmt.Errorf("Minio config not found")
+		}
+		_, port, err := net.SplitHostPort(globalConfig.StorageEngine.Minio.Host)
+		if err != nil {
+			return fmt.Errorf("Error parsing host address %s: %v\n", globalConfig.StorageEngine.Minio.Host, err)
+		}
+		globalConfig.StorageEngine.Minio.Host = fmt.Sprintf("%s:%s", minioIP, port)
+	}
+
+	minioPort := strings.ToLower(os.Getenv("MINIO_PORT"))
+	// println(fmt.Sprintf("MINIO ip and port from env: %s:%s", minioIP, minioPort))
+	if minioPort != "" {
+		if globalConfig.StorageEngine.Minio == nil {
+			return fmt.Errorf("Minio config not found")
+		}
+		ip, _, err := net.SplitHostPort(globalConfig.StorageEngine.Minio.Host)
+		if err != nil {
+			return fmt.Errorf("Error parsing host address %s: %v\n", globalConfig.StorageEngine.Minio.Host, err)
+		}
+		globalConfig.StorageEngine.Minio.Host = fmt.Sprintf("%s:%s", ip, minioPort)
+	}
+
+	minioRegion := strings.ToLower(os.Getenv("MINIO_REGION"))
+	if minioRegion != "" {
+		if globalConfig.StorageEngine.Minio == nil {
+			return fmt.Errorf("Minio config not found")
+		}
+		globalConfig.StorageEngine.Minio.Region = minioRegion
 	}
 
 	// Language
@@ -457,8 +500,6 @@ func FromConfigFile(configPath string) error {
 		v.SetConfigType("yaml")
 		v.AddConfigPath("./conf")
 		v.AddConfigPath(".")
-		v.AddConfigPath("./config")
-		v.AddConfigPath("./internal/config")
 		v.AddConfigPath("/etc/ragflow/")
 	}
 
@@ -566,11 +607,6 @@ func FromConfigFile(configPath string) error {
 
 	// Map doc_engine section to DocEngineConfig
 	if globalConfig != nil && globalConfig.DocEngine.Type == "" {
-		// Use DOC_ENGINE env var if set
-		//if docEngine != "" {
-		//	globalConfig.DocEngine.Type = EngineType(docEngine)
-		//}
-		// Try to map from doc_engine section (overrides env var if present)
 		if v.IsSet("doc_engine") {
 			docEngineConfig := v.Sub("doc_engine")
 			if docEngineConfig != nil {
@@ -604,6 +640,57 @@ func FromConfigFile(configPath string) error {
 						URI:          infConfig.GetString("uri"),
 						PostgresPort: infConfig.GetInt("postgres_port"),
 						DBName:       infConfig.GetString("db_name"),
+					}
+				}
+			}
+		}
+	}
+
+	if globalConfig != nil && globalConfig.StorageEngine.Type == "" {
+		// Also check legacy es section for backward compatibility
+		if v.IsSet("minio") {
+			minioConfig := v.Sub("minio")
+			if minioConfig != nil {
+				if globalConfig.StorageEngine.Minio == nil {
+					globalConfig.StorageEngine.Minio = &MinioConfig{
+						Host:       minioConfig.GetString("host"),
+						User:       minioConfig.GetString("user"),
+						Password:   minioConfig.GetString("password"),
+						Secure:     minioConfig.GetBool("secure"),
+						PrefixPath: minioConfig.GetString("prefix_path"),
+						Verify:     minioConfig.GetBool("verify"),
+						Region:     minioConfig.GetString("region"),
+						Bucket:     minioConfig.GetString("bucket"),
+					}
+				}
+			}
+		}
+
+		if v.IsSet("s3") {
+			s3Config := v.Sub("s3")
+			if s3Config != nil {
+				if globalConfig.StorageEngine.S3 == nil {
+					globalConfig.StorageEngine.S3 = &S3Config{
+						AccessKey: s3Config.GetString("access_key"),
+						SecretKey: s3Config.GetString("secret_key"),
+						Region:    s3Config.GetString("region"),
+					}
+				}
+			}
+		}
+
+		if v.IsSet("oss") {
+			ossConfig := v.Sub("oss")
+			if ossConfig != nil {
+				if globalConfig.StorageEngine.OSS == nil {
+					globalConfig.StorageEngine.OSS = &OSSConfig{
+						AccessKey:        ossConfig.GetString("access_key"),
+						SecretKey:        ossConfig.GetString("secret_key"),
+						EndpointURL:      ossConfig.GetString("endpoint_url"),
+						Region:           ossConfig.GetString("region"),
+						Bucket:           ossConfig.GetString("bucket"),
+						SignatureVersion: ossConfig.GetString("signature_version"),
+						AddressingStyle:  ossConfig.GetString("addressing_style"),
 					}
 				}
 			}
