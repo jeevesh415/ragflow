@@ -318,7 +318,10 @@ class InfinityConnection(InfinityConnectionBase):
                       "authors_sm_tks"]:
             fields.add(field)
         res_fields = self.get_fields(res, list(fields))
-        return res_fields.get(chunk_id, None)
+        chunk = res_fields.get(chunk_id, None)
+        if chunk is not None:
+            chunk["id"] = chunk_id
+        return chunk
 
     def insert(self, documents: list[dict], index_name: str, knowledgebase_id: str = None) -> list[str]:
         '''
@@ -435,6 +438,16 @@ class InfinityConnection(InfinityConnectionBase):
                             d[k] = json.dumps(v)
                         else:
                             d[k] = v
+                    elif k == "extra":
+                        # RAPTOR writes {"raptor_method": ...} as a dict; Infinity's
+                        # `extra` column is varchar so we serialize on the write path.
+                        # The read path (raptor_utils._as_extra_dict) already accepts
+                        # both dict and JSON-string. Other backends (OceanBase JSON
+                        # column, ES/OpenSearch) keep dict shape — this is Infinity-only.
+                        if isinstance(v, dict):
+                            d[k] = json.dumps(v)
+                        else:
+                            d[k] = v if v else ""
                     elif k == "kb_id":
                         if isinstance(d[k], list):
                             d[k] = d[k][0]  # since d[k] is a list, but we need a str
@@ -485,7 +498,14 @@ class InfinityConnection(InfinityConnectionBase):
                 table_name = index_name
             else:
                 table_name = f"{index_name}_{knowledgebase_id}"
-            table_instance = db_instance.get_table(table_name)
+            try:
+                table_instance = db_instance.get_table(table_name)
+            except InfinityException as e:
+                # src/common/status.cppm, kTableNotExist = 3022
+                if e.error_code == ErrorCode.TABLE_NOT_EXIST:
+                    self.logger.warning(f"Table {table_name} does not exist, skipping update.")
+                    return False
+                raise
             # if "exists" in condition:
             #    del condition["exists"]
 

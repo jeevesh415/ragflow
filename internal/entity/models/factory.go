@@ -30,11 +30,85 @@ func NewModelFactory() *ModelFactory {
 }
 
 // CreateModelDriver creates a ModelDriver for the given provider and model
-func (f *ModelFactory) CreateModelDriver(providerName string, baseURL string, urlSuffix URLSuffix) (ModelDriver, error) {
+func (f *ModelFactory) CreateModelDriver(providerName string, baseURL map[string]string, urlSuffix URLSuffix) (ModelDriver, error) {
 	providerLower := strings.ToLower(providerName)
 	switch providerLower {
+	case "anthropic":
+		return NewAnthropicModel(baseURL, urlSuffix), nil
 	case "zhipu-ai":
 		return NewZhipuAIModel(baseURL, urlSuffix), nil
+	case "deepseek":
+		return NewDeepSeekModel(baseURL, urlSuffix), nil
+	case "moonshot":
+		return NewMoonshotModel(baseURL, urlSuffix), nil
+	case "minimax":
+		return NewMinimaxModel(baseURL, urlSuffix), nil
+	case "gitee":
+		return NewGiteeModel(baseURL, urlSuffix), nil
+	case "siliconflow":
+		return NewSiliconflowModel(baseURL, urlSuffix), nil
+	case "google":
+		return NewGoogleModel(baseURL, urlSuffix), nil
+	case "aliyun":
+		return NewAliyunModel(baseURL, urlSuffix), nil
+	case "volcengine":
+		return NewVolcEngine(baseURL, urlSuffix), nil
+	case "vllm":
+		return NewVllmModel(baseURL, urlSuffix), nil
+	case "xai":
+		return NewXAIModel(baseURL, urlSuffix), nil
+	case "lmstudio":
+		return NewLmStudioModel(baseURL, urlSuffix), nil
+	case "ollama":
+		return NewOllamaModel(baseURL, urlSuffix), nil
+	case "openai":
+		return NewOpenAIModel(baseURL, urlSuffix), nil
+	case "nvidia":
+		return NewNvidiaModel(baseURL, urlSuffix), nil
+	case "openrouter":
+		return NewOpenRouterModel(baseURL, urlSuffix), nil
+	case "huggingface":
+		return NewHuggingFaceModel(baseURL, urlSuffix), nil
+	case "baidu":
+		return NewBaiduModel(baseURL, urlSuffix), nil
+	case "cohere":
+		return NewCoHereModel(baseURL, urlSuffix), nil
+	case "cometapi":
+		return NewCometAPIModel(baseURL, urlSuffix), nil
+	case "fishaudio":
+		return NewFishAudioModel(baseURL, urlSuffix), nil
+	case "mistral":
+		return NewMistralModel(baseURL, urlSuffix), nil
+	case "upstage":
+		return NewUpstageModel(baseURL, urlSuffix), nil
+	case "stepfun":
+		return NewStepFunModel(baseURL, urlSuffix), nil
+	case "baichuan":
+		return NewBaichuanModel(baseURL, urlSuffix), nil
+	case "jina":
+		return NewJinaModel(baseURL, urlSuffix), nil
+	case "localai":
+		return NewLocalAIModel(baseURL, urlSuffix), nil
+	case "xinference":
+		return NewXinferenceModel(baseURL, urlSuffix), nil
+	case "longcat":
+		return NewLongCatModel(baseURL, urlSuffix), nil
+	case "novita":
+		return NewNovitaModel(baseURL, urlSuffix), nil
+	case "replicate":
+		return NewReplicateModel(baseURL, urlSuffix), nil
+	case "togetherai":
+		return NewTogetherAIModel(baseURL, urlSuffix), nil
+	case "voyage":
+		return NewVoyageModel(baseURL, urlSuffix), nil
+	case "paddleocr":
+		return NewPaddleOCRModel(baseURL, urlSuffix), nil
+	case "xunfei":
+		return NewXunFeiModel(baseURL, urlSuffix), nil
+	case "deepinfra":
+		return NewDeepInfraModel(baseURL, urlSuffix), nil
+	case "mineru":
+		return NewMinerUModel(baseURL, urlSuffix), nil
 	default:
 		return NewDummyModel(baseURL, urlSuffix), nil
 	}

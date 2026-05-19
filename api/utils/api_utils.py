@@ -325,7 +325,7 @@ def token_required(func):
         from common import settings
         from itsdangerous.url_safe import URLSafeTimedSerializer as Serializer
         try:
-            jwt = Serializer(secret_key=settings.SECRET_KEY)
+            jwt = Serializer(secret_key=settings.get_secret_key())
             raw_token = str(jwt.loads(token))
             user = UserService.query(access_token=raw_token, status=StatusEnum.VALID.value)
             if user:
@@ -439,6 +439,7 @@ def get_parser_config(chunk_method, parser_config):
                     "category",
                 ],
                 "method": "light",
+                "batch_chunk_token_size": 4096,
             },
             "parent_child": {
                 "use_parent_child": False,
